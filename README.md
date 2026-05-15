@@ -23,6 +23,10 @@ Aivle/
 ├── 미니프로젝트 1차/   # 팀 협업 · AI 기획 발표
 ├── 미니프로젝트 2차/   # AI 강사 Agent v2.0 (PPT → 강의 영상 자동화)
 └── 미니프로젝트 3차/   # 상품리뷰분석 Agent v2.0 (Supervisor + Dashboard)
+
+🧪 Side Project (별도 레포)
+└─ NoteBook_MOD       # ↑ Project 3에서 모듈화 한계를 느껴 직접 만든 JupyterLab Extension
+                      # → https://github.com/popixoxipop-collab/NoteBook_MOD
 ```
 
 ---
@@ -147,6 +151,178 @@ Aivle/
 
 - `Step2_Agent 역할 정의서_양식.xlsx` — 에이전트별 입력/출력/책임 정의
 - `Step2_Workflow 명세서 외 기타 설계문서들_양식.xlsx` — 노드·엣지·상태 명세
+
+---
+
+## 🧪 Side Project — NoteBook_MOD
+
+> **Project 3 진행 중 부딪힌 한계에서 출발한 사이드 프로젝트.**
+> 🔗 https://github.com/popixoxipop-collab/NoteBook_MOD
+
+### 🩹 동기 — Project 3에서 느낀 모듈화의 벽
+
+Project 3의 `Step1_상품리뷰분석_Agent_1_완성.ipynb`는 **62개 셀**에
+ReviewState · analyzer_node · critic_node · supervisor_node · DB CRUD · Streamlit UI · 실행 테스트가
+**전부 한 파일**에 뒤섞여 있었다. 더구나 `app.py`(Streamlit)에는 Agent 코드가 통째로 복붙되어 중복까지 발생.
+
+| 위반된 설계 원칙 | 노트북에서의 증상 |
+|---|---|
+| 단일 책임(SRP) | 분석·검증·DB·UI가 같은 노트북 |
+| 관심사 분리(SoC) | Agent 로직 + Streamlit UI 같은 셀 |
+| 재사용성 | `app.py`에 Agent 코드 복붙 |
+| 테스트 가능성 | 함수 개별 import 불가 |
+
+기존 도구(`nbconvert`, `jupytext`, `Soorgeon`, `nbrefactor`)는 모두 한계가 있었다 — **변환은 되지만 "함수/레이어별로 자동 분리하고 import까지 연결"해주는 도구는 없었다.** 그래서 직접 만들기로 함.
+
+### 💡 솔루션 — 노트북 → 자동 모듈화 JupyterLab Extension
+
+```
+[Before — 1 ipynb, 62 cells]              [After — 패키지 구조]
+
+Step1_..._완성.ipynb                       myproject/
+├─ ReviewState                             ├─ state.py             ← ReviewState
+├─ analyzer_node                           ├─ agents/
+├─ critic_node                             │   ├─ analyzer_node.py
+├─ supervisor_node                         │   ├─ critic_node.py
+├─ DB 연결/생성/저장                       │   └─ supervisor_node.py
+├─ Streamlit UI                            ├─ graph/
+└─ 실행 테스트                             │   ├─ build_graph.py
+   (전부 한 파일, 중복 포함)              │   └─ route_next.py
+                                           ├─ db/
+                                           │   ├─ init_db.py
+                                           │   └─ save_result.py
+                                           └─ utils/
+```
+
+> 실제로 본 레포의 `extension/` 폴더에 위 구조 그대로 들어있다 — Project 3 노트북을 모듈화한 결과물이 그대로 dogfood 샘플.
+
+### 🧠 핵심 알고리즘 — 3단계 분류 파이프라인
+
+```
+함수/클래스 추출 (CodeMirror 정규식)
+        │
+        ▼
+┌─────────────────────────────────────────┐
+│ Step 1. StateDB hit                     │
+│   .nbmod_state.db 확정 매핑 즉시 반환    │  ← LLM 호출 0
+│   (human-confirmed 경로 우선)            │
+└──────────────┬──────────────────────────┘
+               │ miss
+               ▼
+┌─────────────────────────────────────────┐
+│ Step 2. OpenAI gpt-4o-mini 분류         │
+│   확정 사례 + 수정 이력 few-shot 주입    │
+│   JSON 응답: {path, confidence, reason} │
+└──────────────┬──────────────────────────┘
+               │ 실패/부재
+               ▼
+┌─────────────────────────────────────────┐
+│ Step 3. 규칙 기반 Fallback              │
+│   sentence-transformers / TF-IDF        │
+│   + greedy cosine 클러스터링            │
+│   + 함수명 정규식 (*_node → agents/...)  │
+└─────────────────────────────────────────┘
+```
+
+### 🎨 핵심 UX — 인라인 모듈 뱃지
+
+함수 본문이 사라지는 대신 **CodeMirror StateField + Widget으로 뱃지로 치환**된다.
+
+```
+[모듈화 전]                          [모듈화 후]
+
+def analyzer_node(state):     →     def 📄 analyzer_node
+    review = state["review"]              ↑ hover/click 가능
+    system_prompt = """..."""             (본문 30줄 숨김)
+    ...
+```
+
+| 동작 | 결과 |
+|---|---|
+| **hover** | 원본 함수 코드 툴팁 (syntax highlight) |
+| **click** | 연결된 `.py` 파일을 JupyterLab 우측 패널에서 오픈 |
+| **double-click** | 뱃지 풀려서 셀에 코드 인라인 전개 |
+| **confidence < 0.8** | `nbmod-uncertain` 클래스로 시각 강조 |
+| **human-confirmed** | `nbmod-confirmed` 클래스로 강조 |
+
+### 🔁 Human-in-the-Loop — 사용자가 LLM 학습 데이터를 만든다
+
+뱃지 클릭 시 드롭다운에서 카테고리를 수정할 수 있고, **수정 즉시 StateDB에 영속화** → 다음 분류부터 **few-shot 예시로 자동 주입**.
+
+```sql
+-- .nbmod_state.db 스키마
+CREATE TABLE confirmed_mappings (
+  func_name TEXT PRIMARY KEY,
+  file_path TEXT NOT NULL,
+  source    TEXT NOT NULL,    -- 'llm' | 'human'
+  confidence REAL DEFAULT 1.0
+);
+CREATE TABLE corrections (
+  id INTEGER PRIMARY KEY,
+  func_name TEXT,
+  from_path TEXT,
+  to_path   TEXT             -- → 다음 LLM 프롬프트 few-shot
+);
+```
+
+### 🛠️ 기술 스택
+
+| 레이어 | 사용 기술 |
+|---|---|
+| **Extension Frontend** | TypeScript · JupyterLab 4.x · CodeMirror 6 (StateField, EditorView, ViewPlugin) |
+| **Extension Backend** | Python · `jupyter-server` APIHandler · Tornado |
+| **LLM** | OpenAI `gpt-4o-mini` (JSON 응답 강제, temperature 0) |
+| **Embedding Fallback** | `sentence-transformers` (`all-MiniLM-L6-v2`) · TF-IDF (`char_wb` 3-5 n-gram) |
+| **State** | SQLite (`.nbmod_state.db`, cwd-scoped) |
+| **Build** | `hatchling` · `hatch-jupyter-builder` · yarn (jlpm) |
+| **MVP 웹 버전 설계** | Next.js + Tailwind, FastAPI, React Flow, Vercel + Railway |
+
+### 📂 레포 구조
+
+```
+NoteBook_MOD/
+├─ MVP_DESIGN.md                 # 시장 분석·MVP 범위·아키텍처 11개 섹션
+└─ extension/
+   ├─ src/                       # TypeScript — CodeMirror StateField, 뱃지, 드롭다운
+   │   ├─ index.ts               # 플러그인 진입점 (state-aware + correction UI)
+   │   ├─ algorithm.ts           # 규칙 기반 경로 추론 (클라이언트 사이드)
+   │   ├─ badge.ts               # CodeMirror Widget 뱃지
+   │   ├─ viewPlugin.ts          # StateField + StateEffect
+   │   ├─ stateStore.ts          # 백엔드 state API 클라이언트
+   │   └─ correctionWidget.ts    # 수정 드롭다운 UI
+   ├─ notebook_mod/              # Python — jupyter-server 핸들러
+   │   ├─ handlers.py            # /analyze, /state, /categories
+   │   ├─ llm_classifier.py      # OpenAI 분류기 (few-shot 빌더)
+   │   └─ state_db.py            # SQLite 영속 상태
+   └─ extension/                 # ★ Project 3 노트북을 모듈화한 dogfood 샘플
+      ├─ state.py                # ReviewState
+      ├─ agents/                 # analyzer/critic/supervisor 노드
+      ├─ graph/                  # build_graph + route_next
+      └─ db/                     # init_db + save_result
+```
+
+### 🎯 Project 3과의 연결
+
+| Project 3 (노트북 안) | NoteBook_MOD (분리 결과) |
+|---|---|
+| `class ReviewState(TypedDict):` | `extension/state.py` |
+| `def analyzer_node(state):` | `extension/agents/analyzer_node.py` |
+| `def critic_node(state):` | `extension/agents/critic_node.py` |
+| `def supervisor_node(state):` | `extension/agents/supervisor_node.py` |
+| `builder = StateGraph(...)` | `extension/graph/build_graph.py` |
+| `def route_next(state):` | `extension/graph/route_next.py` |
+| SQLite 저장 코드 | `extension/db/save_result.py`, `init_db.py` |
+
+→ **Project 3의 모듈화 한계가 곧 NoteBook_MOD의 검증 케이스가 된 구조.**
+
+### 📈 MVP 성공 지표
+
+| 지표 | 목표 |
+|---|---|
+| 셀 분류 정확도 | ≥ 85% (vs 사람) |
+| import 자동 연결 성공률 | ≥ 80% |
+| 62-cell 노트북 처리 시간 | ≤ 20초 |
+| `python -c "import myproject"` 통과 | ≥ 70% |
 
 ---
 
